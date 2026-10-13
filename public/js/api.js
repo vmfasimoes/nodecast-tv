@@ -9,8 +9,10 @@ const API = {
     async request(method, endpoint, data = null) {
         const options = {
             method,
-            headers: { 'Content-Type': 'application/json' },
-            credentials: 'same-origin'
+            credentials: 'same-origin',
+            headers: {
+                'Content-Type': 'application/json'
+            }
         };
 
         if (data) {
@@ -31,7 +33,7 @@ const API = {
         if (!response.ok) {
             if (response.status === 401) {
                 window.location.href = '/login.html';
-                return;
+                throw new Error('Authentication required');
             }
             throw new Error(result.error || `Server responded with ${response.status}`);
         }

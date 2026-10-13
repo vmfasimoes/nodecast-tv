@@ -28,7 +28,7 @@ class App {
 
     async init() {
         // Check authentication first
-        await this.checkAuth();
+        if (!await this.checkAuth()) return;
 
         // Mobile menu toggle
         const mobileMenuToggle = document.getElementById('mobile-menu-toggle');
@@ -165,7 +165,15 @@ class App {
     }
 
     async checkAuth() {
+        const token = localStorage.getItem('authToken');
+
         try {
+            if (token) {
+                const migrated = await fetch('/api/auth/session', { method: 'POST',
+                    headers: { Authorization: `Bearer ${token}` } });
+                localStorage.removeItem('authToken');
+                if (!migrated.ok) throw new Error('Please sign in again');
+            }
             const response = await fetch('/api/auth/me', { credentials: 'same-origin' });
 
             if (!response.ok) {
@@ -183,10 +191,12 @@ class App {
             }
 
             this.addLogoutButton();
+            return true;
 
         } catch (err) {
             console.error('Authentication error:', err);
             window.location.replace('/login.html');
+            return false;
         }
     }
 
@@ -207,7 +217,12 @@ class App {
 
         logoutLink.addEventListener('click', async (e) => {
             e.preventDefault();
+
+            this.player.stop();
+            this.pages.watch.stop();
             await fetch('/api/auth/logout', { method: 'POST', credentials: 'same-origin' });
+
+            localStorage.removeItem('authToken');
             window.location.replace('/login.html');
         });
 

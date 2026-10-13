@@ -2,17 +2,23 @@ const express = require('express');
 require('dotenv').config();
 const path = require('path');
 const passport = require('passport');
+const auth = require('./auth');
+const security = require('./config/security');
+const { requestLimit } = require('./services/requestLimits');
+const { validateHttpUrl, redactText } = require('./services/urlSecurity');
 const syncService = require('./services/syncService');
 
 // Initialize database
 require('./db');
 
 const app = express();
+app.locals.ready = false;
 const PORT = process.env.PORT || 3000;
 
-// Trust the first proxy hop (nginx, Caddy, etc.) for X-Forwarded-For / X-Forwarded-Proto.
-// Using 1 instead of true so express-rate-limit can safely use the client IP.
-app.set('trust proxy', 1);
+// Trust proxy headers (X-Forwarded-Proto, X-Forwarded-For, etc.)
+// Required for correct protocol detection behind reverse proxies (nginx, Caddy, etc.)
+const trustProxy = process.env.TRUST_PROXY;
+app.set('trust proxy', trustProxy === 'true' ? true : trustProxy === 'false' ? false : trustProxy || 'loopback, linklocal, uniquelocal');
 
 // Middleware
 app.use(express.json({ limit: '50mb' }));
@@ -21,9 +27,11 @@ app.use(require('cookie-parser')());
 // Initialize Passport
 const session = require('express-session');
 app.use(session({
-    secret: process.env.JWT_SECRET || 'keyboard cat',
+    name: security.sessionCookieName,
+    secret: security.sessionSecret,
     resave: false,
-    saveUninitialized: true
+    saveUninitialized: false,
+    cookie: { httpOnly: true, sameSite: 'lax', secure: 'auto', maxAge: 24 * 60 * 60 * 1000 }
 }));
 app.use(passport.initialize());
 app.use(passport.session());
@@ -155,6 +163,7 @@ async function loadPlugins() {
 
 // Graceful shutdown handler for plugins with shutdown hooks
 process.on('SIGTERM', async () => {
+    app.locals.ready = false;
     console.log('SIGTERM received, shutting down plugins...');
     for (const { name, plugin } of loadedPlugins) {
         if (plugin && typeof plugin.shutdown === 'function') {
@@ -170,7 +179,26 @@ process.on('SIGTERM', async () => {
 });
 
 // API Routes
+app.get('/api/health', require('./services/health'));
+app.get('/api/version', (req, res) => res.json({ version: require('../package.json').version }));
+app.use('/api', auth.requireSameOrigin);
 app.use('/api/auth', require('./routes/auth'));
+app.use('/api', auth.requireAuth);
+app.use('/api', (req, res, next) => {
+    try {
+        if (req.query.url !== undefined) validateHttpUrl(req.query.url);
+        if (req.body?.url !== undefined) validateHttpUrl(req.body.url);
+        next();
+    } catch (error) { res.status(400).json({ error: error.message }); }
+});
+app.use('/api', (req, res, next) => {
+    const adminAction = !['GET', 'HEAD', 'OPTIONS'].includes(req.method)
+        && /^\/(sources|channels|settings|proxy\/cache)(\/|$)/.test(req.path);
+    if (adminAction) return auth.requireAdmin(req, res, next);
+    next();
+});
+const mediaLimit = requestLimit(60);
+app.use(['/api/remux', '/api/probe', '/api/subtitle'], mediaLimit);
 app.use('/api/sources', require('./routes/sources'));
 app.use('/api/proxy', require('./routes/proxy'));
 app.use('/api/channels', require('./routes/channels'));
@@ -183,12 +211,6 @@ app.use('/api/settings', require('./routes/settings'));
 app.use('/api/history', require('./routes/history'));
 app.use('/api/openwebif', require('./routes/openwebif'));
 
-// Version endpoint
-app.get('/api/version', (req, res) => {
-    const pkg = require('../package.json');
-    res.json({ version: pkg.version });
-});
-
 // SPA fallback - serve index.html for all non-API routes
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, '..', 'public', 'index.html'));
@@ -196,17 +218,19 @@ app.get('*', (req, res) => {
 
 // Error handling
 app.use((err, req, res, next) => {
-    console.error('Server error:', err);
+    console.error('Server error:', redactText(err.message));
     res.status(500).json({ error: 'Internal server error' });
 });
 
-app.listen(PORT, async () => {
-    console.log(`NodeCast TV server running on http://localhost:${PORT}`);
+const server = app.listen(PORT, async () => {
+    console.log(`NodeCast TV server running on http://localhost:${server.address().port}`);
 
     // Load plugins
     await loadPlugins().catch(err => {
         console.error('Plugin initialization failed:', err);
     });
+    app.locals.ready = true;
+    if (process.env.NODECAST_DISABLE_BACKGROUND_JOBS === 'true') return;
 
     // Trigger background sync with delay to allow server to settle
     setTimeout(async () => {

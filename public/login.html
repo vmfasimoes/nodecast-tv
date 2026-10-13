@@ -389,6 +389,9 @@
                     throw new Error(data.error || 'Authentication failed');
                 }
 
+                // Clear any legacy token from older versions
+                localStorage.removeItem('authToken');
+
                 if (data.requires2fa) {
                     pendingTempToken = data.tempToken;
                     showTotpStep();
