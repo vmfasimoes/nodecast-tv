@@ -211,8 +211,11 @@ class TranscodeSession extends EventEmitter {
         }
 
         // Map streams
-       if (this.options.program) {
-            args.push('-map', `p:${this.options.program}`);
+        // Only map video/audio from the program: mapping the whole program pulls in
+        // DVB teletext/subtitle streams, which can't be encoded to HLS and kill FFmpeg
+        if (this.options.program) {
+            args.push('-map', `0:p:${this.options.program}:v:0`);
+            args.push('-map', `0:p:${this.options.program}:a:0?`);
         } else {
             args.push('-map', '0:v:0');
             args.push('-map', '0:a:0?');
