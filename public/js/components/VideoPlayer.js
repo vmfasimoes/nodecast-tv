@@ -1499,22 +1499,19 @@ class VideoPlayer {
         const delay = parseInt(channel.zapDelay) || 1500;
 
         try {
-            const u = new URL(streamUrl);
-            const boxUrl = `${u.protocol}//${u.hostname}`;
-
             console.log('[ZAP] before streaming:', {
                 channel: channel.name,
                 serviceRef: channel.streamId,
-                boxUrl,
                 delay
             });
 
+            // The server resolves the receiver from the configured source
             const res = await fetch('/api/openwebif/zap', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
-                    boxUrl,
-                    serviceRef: channel.streamId
+                    sourceId: channel.sourceId,
+                    streamId: channel.streamId
                 })
             });
 

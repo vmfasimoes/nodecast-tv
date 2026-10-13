@@ -1,3 +1,5 @@
+'use strict';
+
 /**
  * M3U Playlist Parser (Streaming)
  * Parses EXTM3U format playlists and extracts channel information line-by-line
@@ -195,6 +197,7 @@ async function* parseStreaming(input, batchSize = 500) {
     const groupsSet = new Set();
     let currentInfo = null;
     let currentGroup = null;
+    let currentVlcProgram = null;
     let batch = [];
 
     let lines;
