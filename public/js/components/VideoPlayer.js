@@ -218,6 +218,12 @@ class VideoPlayer {
             togglePlay();
         });
 
+        // Stop button (ends playback and the server-side transcode session)
+        document.getElementById('btn-stop')?.addEventListener('click', (e) => {
+            e.stopPropagation();
+            this.stop();
+        });
+
         // Center play button (large button shown when paused)
         const centerPlayBtn = document.getElementById('player-center-play');
         centerPlayBtn?.addEventListener('click', (e) => {
