@@ -278,7 +278,7 @@ class SyncService {
         const stmt = db.prepare(`
             INSERT INTO playlist_items (
                 id, source_id, item_id, type, name, category_id, 
-                stream_icon, stream_url,program, container_extension, 
+                stream_icon, stream_url, program, container_extension, 
                 rating, year, added_at, data
             )
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)

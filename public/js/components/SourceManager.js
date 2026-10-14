@@ -339,7 +339,6 @@ class SourceManager {
             alert('Name and URL are required');
             return;
         }
-        console.log("[updateSource] type:",type);
         try {
             const data = { name, url };
             if (type === 'xtream') {
