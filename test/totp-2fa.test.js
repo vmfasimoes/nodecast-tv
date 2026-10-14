@@ -166,3 +166,11 @@ test('TOTP secrets are encrypted at rest without configuration and never returne
         assert.equal(user.totpEnabled, true);
     }
 });
+
+test('second-factor guessing is rate limited per client', async t => {
+    const { request } = await serverFixture(t);
+    for (let i = 0; i < 10; i++) {
+        assert.equal((await request('/api/auth/2fa/verify', { body: { tempToken: 'invalid', code: '000000' } })).status, 401);
+    }
+    assert.equal((await request('/api/auth/2fa/verify', { body: { tempToken: 'invalid', code: '000000' } })).status, 429);
+});

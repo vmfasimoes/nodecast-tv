@@ -1,6 +1,5 @@
 const express = require('express');
 const router = express.Router();
-const rateLimit = require('express-rate-limit');
 const QRCode = require('qrcode');
 const db = require('../db');
 const auth = require('../auth');
@@ -8,12 +7,8 @@ const { requestLimit } = require('../services/requestLimits');
 const authTokens = require('../services/authTokens');
 const loginLimit = requestLimit(20);
 
-const totpVerifyLimiter = rateLimit({
-    windowMs: 15 * 60 * 1000, // 15 minutes
-    max: 5,
-    skipSuccessfulRequests: true,
-    message: { error: 'Too many failed attempts, please try again later' }
-});
+// Bounds TOTP/recovery-code guessing per client, on top of the login limit
+const totpVerifyLimiter = requestLimit(10, 15 * 60 * 1000);
 
 // Fields safe to return from user management endpoints (no hashes or TOTP secrets)
 function publicUser(user) {
