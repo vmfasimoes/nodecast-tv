@@ -15,6 +15,12 @@ const totpVerifyLimiter = rateLimit({
     message: { error: 'Too many failed attempts, please try again later' }
 });
 
+// Fields safe to return from user management endpoints (no hashes or TOTP secrets)
+function publicUser(user) {
+    const { id, username, role, email, oidcId, createdAt, updatedAt } = user;
+    return { id, username, role, email, oidcId, createdAt, updatedAt, totpEnabled: !!user.totpEnabled };
+}
+
 // Configure Passport strategies
 auth.configureLocalStrategy(
     async (username) => await db.users.getByUsername(username),
@@ -134,11 +140,11 @@ router.post('/login', loginLimit, (req, res, next) => {
             return res.status(401).json({ error: info?.message || 'Invalid credentials' });
         }
 
-        // If 2FA is enabled, issue a short-lived temp token instead of the full JWT
+        // If 2FA is enabled, only issue a challenge token; the access token and
+        // cookie are issued by /2fa/verify once the second factor is proven
         const fullUser = await db.users.getById(user.id);
         if (fullUser && fullUser.totpEnabled) {
-            const tempToken = auth.generateTempToken(user.id);
-            return res.json({ requires2fa: true, tempToken });
+            return res.json({ requires2fa: true, tempToken: auth.generateMfaToken(fullUser) });
         }
 
         const token = auth.generateToken(user);
@@ -158,38 +164,35 @@ router.post('/2fa/verify', totpVerifyLimiter, async (req, res) => {
     try {
         const { tempToken, code } = req.body;
 
-        if (!tempToken || !code) {
+        if (typeof tempToken !== 'string' || typeof code !== 'string' || !code.trim()) {
             return res.status(400).json({ error: 'tempToken and code are required' });
         }
 
-        const payload = auth.verifyTempToken(tempToken);
-        if (!payload) {
+        const challenge = auth.verifyMfaToken(tempToken);
+        if (!challenge) {
             return res.status(401).json({ error: 'Invalid or expired token' });
         }
 
-        const user = await db.users.getById(payload.id);
-        if (!user || !user.totpEnabled || !user.totpSecret) {
-            return res.status(401).json({ error: 'Invalid request' });
+        const user = await db.users.getById(challenge.sub);
+        if (!user || !user.totpEnabled || !user.totpSecret
+            || (challenge.authVersion || 0) !== (user.authVersion || 0)) {
+            return res.status(401).json({ error: 'Invalid or expired token' });
         }
 
-        const plainSecret = auth.decryptSecret(user.totpSecret);
-        const totpValid = auth.verifyTotpToken(String(code), plainSecret);
-
-        if (!totpValid) {
-            // Try recovery code fallback
-            const recoveryIndex = user.recoveryCodes
-                ? await auth.matchRecoveryCode(String(code), user.recoveryCodes)
-                : -1;
-
-            if (recoveryIndex === -1) {
-                return res.status(401).json({ error: 'Invalid authenticator code' });
-            }
-
-            // Consume the used recovery code
-            const updatedCodes = [...user.recoveryCodes];
-            updatedCodes[recoveryIndex] = null;
-            await db.users.update(user.id, { recoveryCodes: updatedCodes });
+        // TOTP codes and recovery codes are each consumed atomically, so a code
+        // replayed (or raced) by a second request is rejected
+        const step = auth.matchTotpStep(code.trim(), auth.decryptSecret(user.totpSecret));
+        let accepted = step !== null && await db.users.consumeTotpStep(user.id, step);
+        if (!accepted && step === null) {
+            const hash = await auth.matchRecoveryCode(code, user.recoveryCodes);
+            accepted = hash !== null && await db.users.consumeRecoveryCode(user.id, hash);
         }
+        if (!accepted) {
+            return res.status(401).json({ error: 'Invalid authenticator code' });
+        }
+
+        // The challenge token is single-use
+        authTokens.revoke(challenge);
 
         const token = auth.generateToken(user);
         auth.setAuthCookie(req, res, token);
@@ -250,7 +253,8 @@ router.post('/2fa/enable', auth.requireAuth, async (req, res) => {
         }
 
         const plainPending = auth.decryptSecret(user.totpPendingSecret);
-        if (!auth.verifyTotpToken(String(code), plainPending)) {
+        const step = auth.matchTotpStep(String(code).trim(), plainPending);
+        if (step === null) {
             return res.status(401).json({ error: 'Invalid authenticator code' });
         }
 
@@ -260,6 +264,7 @@ router.post('/2fa/enable', auth.requireAuth, async (req, res) => {
             totpSecret: auth.encryptSecret(plainPending),
             totpEnabled: true,
             totpPendingSecret: null,
+            totpLastStep: step,
             recoveryCodes: hashedCodes
         });
 
@@ -294,6 +299,7 @@ router.post('/2fa/disable', auth.requireAuth, async (req, res) => {
             totpSecret: null,
             totpEnabled: false,
             totpPendingSecret: null,
+            totpLastStep: null,
             recoveryCodes: null
         });
 
@@ -355,6 +361,7 @@ router.post('/users/:id/2fa/reset', auth.requireAuth, auth.requireAdmin, async (
             totpSecret: null,
             totpEnabled: false,
             totpPendingSecret: auth.encryptSecret(newSecret),
+            totpLastStep: null,
             recoveryCodes: null
         });
 
@@ -412,7 +419,8 @@ router.post('/users/:id/2fa/enable', auth.requireAuth, auth.requireAdmin, async 
         }
 
         const plainPending = auth.decryptSecret(user.totpPendingSecret);
-        if (!auth.verifyTotpToken(String(code), plainPending)) {
+        const step = auth.matchTotpStep(String(code).trim(), plainPending);
+        if (step === null) {
             return res.status(401).json({ error: 'Invalid authenticator code' });
         }
 
@@ -422,6 +430,7 @@ router.post('/users/:id/2fa/enable', auth.requireAuth, auth.requireAdmin, async 
             totpSecret: auth.encryptSecret(plainPending),
             totpEnabled: true,
             totpPendingSecret: null,
+            totpLastStep: step,
             recoveryCodes: hashedCodes
         });
 
@@ -449,6 +458,7 @@ router.delete('/users/:id/2fa', auth.requireAuth, auth.requireAdmin, async (req,
             totpSecret: null,
             totpEnabled: false,
             totpPendingSecret: null,
+            totpLastStep: null,
             recoveryCodes: null
         });
 
@@ -508,12 +518,7 @@ router.get('/users', auth.requireAuth, auth.requireAdmin, async (req, res) => {
     try {
         const allUsers = await db.users.getAll();
 
-        const users = allUsers.map(u => {
-            const { passwordHash, totpSecret, totpPendingSecret, recoveryCodes, ...safe } = u;
-            return safe;
-        });
-
-        res.json(users);
+        res.json(allUsers.map(publicUser));
     } catch (err) {
         console.error('Error fetching users:', err);
         res.status(500).json({ error: 'Server error' });
@@ -595,7 +600,7 @@ router.put('/users/:id', auth.requireAuth, auth.requireAdmin, async (req, res) =
         }
 
         const updatedUser = await db.users.update(id, updates);
-        res.json(updatedUser);
+        res.json(publicUser(updatedUser));
     } catch (err) {
         console.error('Error updating user:', err);
         res.status(500).json({ error: err.message || 'Server error' });
